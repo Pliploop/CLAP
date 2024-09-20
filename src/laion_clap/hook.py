@@ -12,7 +12,7 @@ from clap_module import create_model
 from .training.data import get_audio_features
 from .training.data import int16_to_float32, float32_to_int16
 
-from transformers import RobertaTokenizer
+from transformers import RobertaTokenizer, RobertaTokenizerFast
 import wget
 from clap_module.factory import load_state_dict
 
@@ -57,18 +57,29 @@ class CLAP_Module(torch.nn.Module):
                 enable_fusion=enable_fusion
             )
         self.enable_fusion = enable_fusion
+        print(f'CLAP model is created with fusion: {enable_fusion}')
         self.model = model
         self.model_cfg = model_cfg
-        self.tokenize = RobertaTokenizer.from_pretrained('roberta-base')
+        self.tokenize = RobertaTokenizerFast.from_pretrained('roberta-base')
 
     def tokenizer(self, text):
-        result = self.tokenize(
-            text,
-            padding="max_length",
-            truncation=True,
-            max_length=77,
-            return_tensors="pt",
-        )
+        try:
+            result = self.tokenize(
+                text,
+                padding="max_length",
+                truncation=True,
+                max_length=77,
+                return_tensors="pt",
+                return_offsets_mapping=True
+            )
+        except:
+            result = self.tokenize(
+                text,
+                padding="max_length",
+                truncation=True,
+                max_length=77,
+                return_tensors="pt",
+            )
         return result
 
     def load_ckpt(self, ckpt = None, model_id = -1, verbose = True):
@@ -149,12 +160,10 @@ class CLAP_Module(torch.nn.Module):
             )
             audio_input.append(temp_dict)
         audio_embed = self.model.get_audio_embedding(audio_input)
-        if not use_tensor:
-            audio_embed = audio_embed.detach().cpu().numpy()
         return audio_embed
 
 
-    def get_audio_embedding_from_data(self, x, use_tensor=False):
+    def get_audio_embedding_from_data(self, x, use_tensor=True):
         """get audio embeddings from the audio data
 
         Parameters
@@ -173,10 +182,13 @@ class CLAP_Module(torch.nn.Module):
         audio_input = []
         for audio_waveform in x:          
             # quantize
-            if not use_tensor:
-                audio_waveform = int16_to_float32(float32_to_int16(audio_waveform))
-                audio_waveform = torch.from_numpy(audio_waveform).float()
+            if isinstance(audio_waveform, torch.Tensor):
+                audio_waveform = audio_waveform.cpu().numpy()
+            audio_waveform = int16_to_float32(float32_to_int16(audio_waveform))
+            audio_waveform = torch.from_numpy(audio_waveform).float()
+            
             temp_dict = {}
+            
             temp_dict = get_audio_features(
                 temp_dict, audio_waveform, 480000, 
                 data_truncating='fusion' if self.enable_fusion else 'rand_trunc', 
@@ -184,13 +196,16 @@ class CLAP_Module(torch.nn.Module):
                 audio_cfg=self.model_cfg['audio_cfg'],
                 require_grad=audio_waveform.requires_grad
             )
+                    
             audio_input.append(temp_dict)
         audio_embed = self.model.get_audio_embedding(audio_input)
         if not use_tensor:
-            audio_embed = audio_embed.detach().cpu().numpy()
+            if isinstance(audio_embed, dict):
+                for k in audio_embed.keys():
+                    audio_embed[k] = audio_embed[k].detach().cpu().numpy()
         return audio_embed
 
-    def get_text_embedding(self, x, tokenizer = None, use_tensor = False):
+    def get_text_embedding(self, x, tokenizer = None, use_tensor = True, return_dict = True, return_tokenizer_only = False):
         """get text embeddings from texts
 
         Parameters
@@ -211,9 +226,54 @@ class CLAP_Module(torch.nn.Module):
             text_input = tokenizer(x)
         else:
             text_input = self.tokenizer(x)
-        text_embed = self.model.get_text_embedding(text_input)
+            
+        if return_tokenizer_only:
+            return text_input
+            
+        text_embed = self.model.get_text_embedding(text_input, return_dict = return_dict)
         if not use_tensor:
-            text_embed = text_embed.detach().cpu().numpy()
-        return text_embed
+            if return_dict:
+                for k in text_embed.keys():
+                    text_embed[k] = text_embed[k].detach().cpu().numpy()
+            
+        if return_dict:
+            text_input.update(text_embed)
+        else:
+            text_input = text_embed
         
+        return text_input
+        
+    @torch.no_grad()
+    def get_clap_score(self,audio,prompts, latents = True):
+        audio_embed = self.get_audio_embedding_from_data(audio, use_tensor=True) if not latents else audio
+        text_embed = self.get_text_embedding(prompts, use_tensor=True, return_dict=False)
+        
+        print(audio_embed.shape)
+        print(text_embed.shape)
+        
+        
+        
+        sims = audio_embed @ text_embed.t()
+        
+        print(sims.shape)
+        
+        sims = sims.max(1).values
+        
+        
+        
+        
+        diag = sims.diag()
+        # print(diag.shape)
+        print(f'diag mean {diag.mean()}')
+        print(f' outside {sims.mean()}')
+        print(f' outside max {sims.max()}')
+        print(f' outside min {sims.min()}')
+        
+        # scores along the diagonal are the scores of the same audio and prompt
+        
+        
+        
+        return {
+            'CLAP_Score': diag.mean()
+        }
     

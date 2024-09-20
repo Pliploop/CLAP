@@ -974,8 +974,7 @@ class HTSAT_Swin_Transformer(nn.Module):
 
         # We process the data in the dataloader part, in that here we only consider the input_T < fixed_T
         
-        
-
+    
         return output_dict
 
 def create_htsat_model(audio_cfg, enable_fusion=False, fusion_type='None'):

@@ -587,7 +587,9 @@ class CLAP(nn.Module):
         return mask
 
     def encode_audio(self, audio, device):
-        return self.audio_branch(audio, mixup_lambda=None, device=device)  # mix lambda needs to add
+         
+        out_ = self.audio_branch(audio, mixup_lambda=None, device=device)  # mix lambda needs to add
+        return out_
 
     # def list_of_dict_of_tensor2dict_of_tensor(self, x, device):
     #     tmp = {}
@@ -599,7 +601,7 @@ class CLAP(nn.Module):
     #         tmp[k] = torch.tensor(tmp[k]).to(device=device, non_blocking=True)
     #     return tmp
 
-    def encode_text(self, text, device):
+    def encode_text(self, text, device,return_dict = False):
         if self.text_branch_type == "transformer":
             text = text.to(device=device, non_blocking=True)
             x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
@@ -616,7 +618,7 @@ class CLAP(nn.Module):
         elif self.text_branch_type == "bert":
             # text = self.list_of_dict_of_tensor2dict_of_tensor(text, device)
             # text = BatchEncoding(text)
-            x = self.text_branch(
+            output = self.text_branch(
                 input_ids=text["input_ids"].to(device=device, non_blocking=True),
                 attention_mask=text["attention_mask"].to(
                     device=device, non_blocking=True
@@ -624,27 +626,35 @@ class CLAP(nn.Module):
                 token_type_ids=text["token_type_ids"].to(
                     device=device, non_blocking=True
                 ),
-            )["pooler_output"]
+            )
+            x = output['pooler_output']
             x = self.text_projection(x)
+            output['projected_pooler_output'] = x
         elif self.text_branch_type == "roberta":
-            x = self.text_branch(
+            output = self.text_branch(
                 input_ids=text["input_ids"].to(device=device, non_blocking=True),
                 attention_mask=text["attention_mask"].to(
                     device=device, non_blocking=True
                 ),
-            )["pooler_output"]
+            )
+            x = output['pooler_output']
             x = self.text_projection(x)
+            output['projected_pooler_output'] = x
         elif self.text_branch_type == "bart":
-            x = torch.mean(self.text_branch(
+            output = self.text_branch(
                 input_ids=text["input_ids"].to(device=device, non_blocking=True),
                 attention_mask=text["attention_mask"].to(
                     device=device, non_blocking=True
                 ),
-            )["encoder_last_hidden_state"],axis=1)
+            )
+            x = torch.mean(output["encoder_last_hidden_state"],axis=1)
             x = self.text_projection(x)
+            output['projected_pooler_output'] = x
         else:
             logging.error(f"Model type {self.text_branch_type} not found")
             raise RuntimeError(f"Model type {self.text_branch_type} not found.")
+        if return_dict:
+            return output
         return x
 
     def forward(self, audio, text, device=None):
@@ -683,19 +693,19 @@ class CLAP(nn.Module):
         audio_features_mlp = self.audio_transform(audio_features)
         text_features_mlp = self.text_transform(text_features)
         # Four outputs: audio features (basic & MLP), text features (basic & MLP)
-        return (
+        return {
             audio_features,
             text_features,
             audio_features_mlp,
             text_features_mlp,
             self.logit_scale_a.exp(),
             self.logit_scale_t.exp(),
-        )
+        }
 
     def get_logit_scale(self):
         return self.logit_scale_a.exp(), self.logit_scale_t.exp()
 
-    def get_text_embedding(self, data):
+    def get_text_embedding(self, data, return_dict=False):
         """Get the text embedding from the model
 
         Parameters
@@ -712,9 +722,13 @@ class CLAP(nn.Module):
         device = next(self.parameters()).device
         for k in data:
             data[k] = data[k].to(device)
-        text_embeds = self.encode_text(data, device=device)
-        text_embeds = F.normalize(text_embeds, dim=-1)
+        text_embeds = self.encode_text(data, device=device, return_dict=return_dict)
         
+        if return_dict:
+            text_embeds['projected_pooler_output'] = F.normalize(text_embeds['projected_pooler_output'], dim=-1)
+        else:
+            text_embeds = F.normalize(text_embeds, dim=-1)
+    
         return text_embeds
 
     def get_audio_embedding(self, data):
@@ -736,13 +750,15 @@ class CLAP(nn.Module):
         keys = data[0].keys()
         for k in keys:
             input_dict[k] = torch.cat([d[k].unsqueeze(0) for d in data], dim=0).to(device)
-        audio_embeds = self.encode_audio(input_dict, device=device)["embedding"]
-        audio_embeds = self.audio_projection(audio_embeds)
-        audio_embeds = F.normalize(audio_embeds, dim=-1)
+        audio_embeds = self.encode_audio(input_dict, device=device)
+        
+        audio_embeds_agg = self.audio_projection(audio_embeds['embedding'])
+        audio_embeds_agg = F.normalize(audio_embeds_agg, dim=-1)
+        
+        audio_embeds['embedding_proj'] = audio_embeds_agg
+        
         return audio_embeds
-
-            
-
+    
     def audio_infer(self, audio, hopsize=None, device=None):
         """Forward one audio and produce the audio embedding
 
