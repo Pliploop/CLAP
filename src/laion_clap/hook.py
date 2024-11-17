@@ -12,7 +12,7 @@ from clap_module import create_model
 from .training.data import get_audio_features
 from .training.data import int16_to_float32, float32_to_int16
 
-from transformers import RobertaTokenizer, RobertaTokenizerFast
+from transformers import RobertaTokenizer, RobertaTokenizerFast, T5EncoderModel, AutoTokenizer
 import wget
 from clap_module.factory import load_state_dict
 
@@ -163,7 +163,7 @@ class CLAP_Module(torch.nn.Module):
         return audio_embed
 
 
-    def get_audio_embedding_from_data(self, x, use_tensor=True):
+    def get_audio_embedding_from_data(self, x, use_tensor=True, **kwargs):
         """get audio embeddings from the audio data
 
         Parameters
@@ -204,6 +204,19 @@ class CLAP_Module(torch.nn.Module):
                 for k in audio_embed.keys():
                     audio_embed[k] = audio_embed[k].detach().cpu().numpy()
         return audio_embed
+    
+    def get_weird_audio_embedding_from_data(self, x, text, use_tensor=True, **kwargs):
+        
+        # get the audio embedding sequence, subtract the mean and add the text embedding from the pooler output
+        audio_features = self.get_audio_embedding_from_data(x, use_tensor=True)['embedding_proj']
+        text_pooled = self.get_text_embedding(text, use_tensor=True, return_dict=True)['pooled_output']
+        
+        audio_features = audio_features - audio_features.mean(0, keepdim=True)
+        audio_features = audio_features + text_pooled
+        
+        return {
+            'weird_audio_embedding': audio_features
+        }
 
     def get_text_embedding(self, x, tokenizer = None, use_tensor = True, return_dict = True, return_tokenizer_only = False):
         """get text embeddings from texts
@@ -242,22 +255,21 @@ class CLAP_Module(torch.nn.Module):
             text_input = text_embed
         
         return text_input
+    
+    def freeze(self):
+        for param in self.model.parameters():
+            param.requires_grad = False
         
     @torch.no_grad()
     def get_clap_score(self,audio,prompts, latents = True):
         audio_embed = self.get_audio_embedding_from_data(audio, use_tensor=True) if not latents else audio
         text_embed = self.get_text_embedding(prompts, use_tensor=True, return_dict=False)
         
-        print(audio_embed.shape)
-        print(text_embed.shape)
         
-        
-        
+        audio_embed = audio_embed.mean(1)
         sims = audio_embed @ text_embed.t()
         
-        print(sims.shape)
         
-        sims = sims.max(1).values
         
         
         
