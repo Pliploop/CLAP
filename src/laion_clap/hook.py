@@ -266,12 +266,13 @@ class CLAP_Module(torch.nn.Module):
         text_embed = self.get_text_embedding(prompts, use_tensor=True, return_dict=False)
         
         
-        audio_embed = audio_embed.mean(1)
-        sims = audio_embed @ text_embed.t()
+        audio_embed = audio_embed.mean(1) if audio_embed.dim() == 3 else audio_embed
+        
+        norm_audio = audio_embed/ audio_embed.norm(dim=1, keepdim=True)
+        norm_text = text_embed/ text_embed.norm(dim=1, keepdim=True)
         
         
-        
-        
+        sims = norm_audio @ norm_text.t()
         
         
         diag = sims.diag()
